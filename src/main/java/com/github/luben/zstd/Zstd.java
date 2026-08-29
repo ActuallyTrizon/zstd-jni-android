@@ -1472,7 +1472,9 @@ public class Zstd {
             if (frameData.compressedSize > src.length - srcPosition) {
                 throw new RuntimeException("Invalid compressed size");
             }
-
+            if (frameData.contentSize < 0) {
+                throw new RuntimeException("Frame content size is invalid");
+            }
             if (frameData.contentSize > MAX_DECOMPRESS_SIZE) {
                 throw new RuntimeException("Frame content size is too large");
             }
@@ -1523,6 +1525,9 @@ public class Zstd {
             }
             // otherwise let ZstdException get error message itself
             throw new ZstdException(contentSize);
+        }
+        if (contentSize < 0) {
+            throw new RuntimeException("Frame content size is invalid");
         }
         if (contentSize > MAX_DECOMPRESS_SIZE) {
             throw new RuntimeException("Frame content size is too large");

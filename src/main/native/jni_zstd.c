@@ -383,13 +383,18 @@ JNIEXPORT jint JNICALL Java_com_github_luben_zstd_Zstd_setCompressionLong
     ZSTD_CCtx* cctx = (ZSTD_CCtx*)(intptr_t) stream;
     if (windowLog < ZSTD_WINDOWLOG_MIN || windowLog > ZSTD_WINDOWLOG_LIMIT_DEFAULT) {
       // disable long matching and reset to default windowLog size
-      ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, ZSTD_ps_disable);
-      ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 0);
+      size_t result = ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, ZSTD_ps_disable);
+      if (ZSTD_isError(result)) {
+        return result;
+      }
+      return ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 0);
     } else {
-      ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, ZSTD_ps_enable);
-      ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, windowLog);
+      size_t result = ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, ZSTD_ps_enable);
+      if (ZSTD_isError(result)) {
+        return result;
+      }
+      return ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, windowLog);
     }
-    return 0;
 }
 
 /*

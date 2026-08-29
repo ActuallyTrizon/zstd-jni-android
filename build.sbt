@@ -83,11 +83,17 @@ jniGccFlags := (
     jniGccFlags.value.filterNot(_ == "-fPIC") ++
       Seq("-D_JNI_IMPLEMENTATION_", "-Wl,--kill-at",
         "-static-libgcc", "-Wl,--version-script=" + PWD + "/libzstd-jni.so.map")
-  else if (System.getProperty("os.name").toLowerCase startsWith "mac")
+  else if (System.getProperty("os.name").toLowerCase startsWith "mac") {
+   // For intel, target the latest version that supported 32bit binaries
+    val target = if (System.getProperty("os.arch") == "x86_64") {
+      Seq("-target","x86_64-apple-macos10.14", "-mmacosx-version-min=10.14")
+    } else {
+      Seq("-target","arm64-apple-macos11",     "-mmacosx-version-min=11")
+    }
     // MacOS uses clang that does not support the "-static-libgcc" and version scripts,
     // but visibility can be modified by `-exported_symbols_list`
-    jniGccFlags.value ++ Seq("-exported_symbols_list", PWD + "/libzstd-jni.so.exported")
-  else
+    jniGccFlags.value ++ Seq("-exported_symbols_list", PWD + "/libzstd-jni.so.exported") ++ target
+  } else
     // the default is compilation with GCC
     jniGccFlags.value ++ Seq(
         "-static-libgcc", "-Wl,--version-script=" + PWD + "/libzstd-jni.so.map", "-Wl,-Bsymbolic", "-Wl,-z,relro,-z,now")

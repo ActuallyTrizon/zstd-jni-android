@@ -1,0 +1,31 @@
+name: Build for DH android
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Install python
+        run: |
+          sudo apt update
+          sudo apt install python3
+      - name: Replace
+        run: |
+          python3 ./replace.py
+      - name: Build
+        run: |
+          bash ./build.sh
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: zstd-jni_dh
+          path: ./build/*.so

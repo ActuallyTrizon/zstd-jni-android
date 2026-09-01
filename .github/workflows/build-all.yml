@@ -1,0 +1,41 @@
+name: Build All
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install python
+        run: |
+          sudo apt update
+          sudo apt install python3
+
+      - name: Build zstd-jni
+        run: |
+          bash ./build.sh
+          mkdir -p out/zstd-jni
+          cp build/*.so out/zstd-jni/
+
+      - name: Build zstd-jni-dh
+        run: |
+          python3 ./replace.py
+          bash ./build.sh
+          mkdir -p builds/zstd-jni-dh
+          cp build/*.so builds/zstd-jni-dh/
+          
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+            name: zstd-jni-all
+            path: builds

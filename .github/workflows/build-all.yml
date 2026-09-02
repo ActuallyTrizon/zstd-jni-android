@@ -24,8 +24,8 @@ jobs:
       - name: Build zstd-jni
         run: |
           bash ./build.sh
-          mkdir -p out/zstd-jni
-          cp build/*.so out/zstd-jni/
+          mkdir -p builds/zstd-jni
+          cp build/*.so builds/zstd-jni/
 
       - name: Build zstd-jni-dh
         run: |

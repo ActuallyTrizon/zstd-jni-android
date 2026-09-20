@@ -2,7 +2,13 @@ name: 'QEMU Cross'
 description: 'Compile and test under QEMU'
 inputs:
   platform:
-    description: 'qemu guest os'
+    description: 'docker --platform of the guest'
+    required: true
+  image:
+    description: 'guest image; needs a JDK 22+ on PATH or apt-installable openjdk-25'
+    required: true
+  build-script:
+    description: 'architecture-specific build script from this action directory'
     required: true
 runs:
   using: 'composite'
@@ -11,4 +17,6 @@ runs:
       shell: bash
       env:
         PLATFORM_NAME: ${{ inputs.platform }}
+        IMAGE_NAME: ${{ inputs.image }}
+        BUILD_SCRIPT: ${{ inputs.build-script }}
         HOST_WORKSPACE_DIR: ${{ github.workspace }}

@@ -3,62 +3,97 @@ on: [push, pull_request]
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: true
+
+# One jar per platform, built on JDK 25, run under three JVMs - only the runtime
+# differs, never the artifact:
+#
+# - JDK 25 -> FFM
+# - JDK 25 with -Djdk.util.jar.enableMultiRelease=false -> JNI
+# - JDK 11 -> JNI (the 8-21 floor)
+#
+# The FFM run only means something because build.sbt's verifyMultiRelease rejects a
+# jar that would resolve to the base copy. testFromJar takes nothing from the compile
+# graph, so testFromJarSetup builds the native library once per job.
 jobs:
     linux:
-        strategy:
-            fail-fast: false
-            matrix:
-                include: [
-                    { os: ubuntu-latest, target: linux/amd64 }
-                ]
-        runs-on: ${{ matrix.os }}
+        runs-on: ubuntu-latest
         steps:
         - uses: actions/checkout@v7
-        - uses: actions/setup-java@v5
+        - id: jdk11
+          uses: actions/setup-java@v5
           with:
             java-version: 11
+            distribution: zulu
+        # Last one wins for JAVA_HOME, so this is what sbt builds with.
+        - id: jdk25
+          uses: actions/setup-java@v5
+          with:
+            java-version: 25
             distribution: zulu
 
         - name: Install sbt-java-module-info
           run: pushd ./sbt-java-module-info; ./sbt publishLocal; popd
 
-        - name: Compile
-          run: ./sbt compile
+        # Coverage has to come off target/classes: sbt-jacoco instruments that
+        # directory offline, so it cannot be collected from a jar run - hence
+        # JNI-only, and on this platform alone.
+        - name: Test and collect coverage (JNI)
+          run: ./sbt jacoco
 
+        # packageClassified only here: every published jar has to carry the
+        # manifest attribute, but that is a property of the build, not the platform.
+        - name: Package
+          run: ./sbt testFromJarSetup packageClassified
+
+        # After packaging, not before: `package` compiles, and sbt-jni rebuilds the
+        # native library on every sbt command, so an earlier `./sbt compile` step
+        # just to have something to inspect costs a full gcc+LTO run.
         - name: Env
           run: echo "nativeJniVersion=`cat version`" >> $GITHUB_ENV
 
         - name: Inspect
-          run: ldd target/classes/${{ matrix.target }}/libzstd-jni-${nativeJniVersion}.so
+          run: ldd target/classes/linux/amd64/libzstd-jni-${nativeJniVersion}.so
 
-        - name: Test
-          run: ./sbt jacoco
+        - name: Test from jar (JDK 25, FFM)
+          run: ./sbt "testFromJar ${{ steps.jdk25.outputs.path }}"
+
+        - name: Test from jar (JDK 25, JNI)
+          run: ./sbt "testFromJar ${{ steps.jdk25.outputs.path }} -Djdk.util.jar.enableMultiRelease=false"
+
+        - name: Test from jar (JDK 11, JNI)
+          run: ./sbt "testFromJar ${{ steps.jdk11.outputs.path }}"
 
         - name: Upload coverage
           uses: codecov/codecov-action@v7
 
         - name: Deploy
-          if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master'}}
+          if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
           env:
             AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
             AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
             AWS_DEFAULT_REGION: "us-east-1"
-          run: aws s3 cp --recursive target/classes/${{ matrix.target }} s3://zstd-jni/github/${{ matrix.target }}
+          run: aws s3 cp --recursive target/classes/linux/amd64 s3://zstd-jni/github/linux/amd64
 
     macos:
         strategy:
             fail-fast: false
             matrix:
                 include: [
-                  { os: macos-15-intel, host_arch: x86_64,   target_arch: x86_64  },
-                  { os: macos-latest,   host_arch: aarch64,  target_arch: aarch64 }
+                  { os: macos-15-intel, host_arch: x86_64,  target_arch: x86_64  },
+                  { os: macos-latest,   host_arch: aarch64, target_arch: aarch64 }
                 ]
         runs-on: ${{ matrix.os }}
         steps:
         - uses: actions/checkout@v7
-        - uses: actions/setup-java@v5
+        - id: jdk11
+          uses: actions/setup-java@v5
           with:
             java-version: 11
+            distribution: zulu
+        - id: jdk25
+          uses: actions/setup-java@v5
+          with:
+            java-version: 25
             distribution: zulu
         - uses: maxim-lobanov/setup-xcode@v1
           with:
@@ -70,14 +105,12 @@ jobs:
         - name: Install sbt-java-module-info
           run: pushd ./sbt-java-module-info; ./sbt publishLocal; popd
 
-        - name: Compile
-          run: ./sbt compile
+        - name: Package
+          run: ./sbt testFromJarSetup
 
+        # After packaging, not before - see the linux job for why.
         - name: Env
           run: echo "nativeJniVersion=`cat version`" >> $GITHUB_ENV
-
-        - name: Inspect classes
-          run: ls -al target/classes/darwin
 
         - name: Inspect
           run: otool -L target/classes/darwin/${{ matrix.target_arch }}/libzstd-jni-${nativeJniVersion}.dylib
@@ -85,14 +118,17 @@ jobs:
         - name: Symbols
           run: nm -m target/classes/darwin/${{ matrix.target_arch }}/libzstd-jni-${nativeJniVersion}.dylib
 
-        - name: Test
-          run: ./sbt test
+        - name: Test from jar (JDK 25, FFM)
+          run: ./sbt "testFromJar ${{ steps.jdk25.outputs.path }}"
 
-        - name: Upload coverage
-          uses: codecov/codecov-action@v7
+        - name: Test from jar (JDK 25, JNI)
+          run: ./sbt "testFromJar ${{ steps.jdk25.outputs.path }} -Djdk.util.jar.enableMultiRelease=false"
+
+        - name: Test from jar (JDK 11, JNI)
+          run: ./sbt "testFromJar ${{ steps.jdk11.outputs.path }}"
 
         - name: Deploy
-          if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master'}}
+          if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
           env:
             AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
             AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -100,13 +136,6 @@ jobs:
           run: aws s3 cp --recursive target/classes/darwin/${{ matrix.host_arch }} s3://zstd-jni/github/darwin/${{ matrix.target_arch }}
 
     windows:
-        strategy:
-            fail-fast: false
-            matrix:
-                include: [
-                    { msystem: MINGW64, arch: x86_64, java_arch: x64, target: 'win\amd64', s3_path: win/amd64 },
-                    { msystem: MINGW32, arch: i686,   java_arch: x86, target: 'win\x86',   s3_path: win/x86 }
-                ]
         runs-on: windows-latest
         defaults:
             run:
@@ -115,15 +144,72 @@ jobs:
         - uses: actions/checkout@v7
         - uses: msys2/setup-msys2@v2
           with:
-            msystem: ${{ matrix.msystem }}
-            install: git base-devel mingw-w64-${{ matrix.arch }}-toolchain
+            msystem: MINGW64
+            install: git base-devel mingw-w64-x86_64-toolchain
+            path-type: inherit
+            update: true
+        - id: jdk11
+          uses: actions/setup-java@v5
+          with:
+            java-version: 11
+            distribution: zulu
+            architecture: x64
+        - id: jdk25
+          uses: actions/setup-java@v5
+          with:
+            java-version: 25
+            distribution: zulu
+            architecture: x64
+
+        - name: Check Java version
+          run: java -version
+
+        - name: Install sbt-java-module-info
+          run: cd ./sbt-java-module-info; ./sbt publishLocal
+
+        - name: Package
+          run: ./sbt testFromJarSetup
+
+        - name: Test from jar (JDK 25, FFM)
+          run: ./sbt "testFromJar ${{ steps.jdk25.outputs.path }}"
+
+        - name: Test from jar (JDK 25, JNI)
+          run: ./sbt "testFromJar ${{ steps.jdk25.outputs.path }} -Djdk.util.jar.enableMultiRelease=false"
+
+        - name: Test from jar (JDK 11, JNI)
+          run: ./sbt "testFromJar ${{ steps.jdk11.outputs.path }}"
+
+        - name: Deploy
+          if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          shell: cmd
+          env:
+            AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            AWS_DEFAULT_REGION: "us-east-1"
+          run: 'aws s3 cp --recursive target\classes\win\amd64 s3://zstd-jni/github/win/amd64'
+
+    windows-x86:
+        # The structural exception: JEP 479 removed the Windows 32-bit x86 port in
+        # JDK 24 and Zulu's last win_i686 build is 11, so no JVM here can run the
+        # FFM path. It builds on 11, ships no versioned classes, and is also the
+        # only job left that compiles the project from source on a JDK below 22.
+        runs-on: windows-latest
+        defaults:
+            run:
+                shell: msys2 {0}
+        steps:
+        - uses: actions/checkout@v7
+        - uses: msys2/setup-msys2@v2
+          with:
+            msystem: MINGW32
+            install: git base-devel mingw-w64-i686-toolchain
             path-type: inherit
             update: true
         - uses: actions/setup-java@v5
           with:
             java-version: 11
             distribution: zulu
-            architecture: ${{ matrix.java_arch }}
+            architecture: x86
 
         - name: Check Java version
           run: java -version
@@ -134,20 +220,17 @@ jobs:
         - name: Compile
           run: ./sbt compile
 
-        - name: Test
+        - name: Test (JNI)
           run: ./sbt test
 
-        - name: Upload coverage
-          uses: codecov/codecov-action@v7
-
         - name: Deploy
-          if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master'}}
+          if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
           shell: cmd
           env:
             AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
             AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
             AWS_DEFAULT_REGION: "us-east-1"
-          run: 'aws s3 cp --recursive target\classes\${{ matrix.target }} s3://zstd-jni/github/${{ matrix.s3_path }}'
+          run: 'aws s3 cp --recursive target\classes\win\x86 s3://zstd-jni/github/win/x86'
 
     windows-cross:
         runs-on: windows-latest
@@ -164,7 +247,9 @@ jobs:
             update: true
 
         - name: Compile
-          run: /opt/aarch64-w64-mingw32/bin/aarch64-w64-mingw32-clang -shared -D_JNI_IMPLEMENTATION_ -Wl,--kill-at  -O3 -DZSTD_MULTITHREAD=1 -I./src/windows/include -I./jni -I./src/main/native -I./src/main/native/common -std=c99 -o libzstd-jni-$(cat version).dll ./src/main/native/*.c ./src/main/native/common/*.c ./src/main/native/compress/*.c ./src/main/native/decompress/*.[cS] ./src/main/native/dictBuilder/*.c
+          # -DZSTD_DLL_EXPORT=1 exports the ZSTD_* symbols the FFM code looks up.
+          # Keep in step with the Windows branch of jniGccFlags in build.sbt.
+          run: /opt/aarch64-w64-mingw32/bin/aarch64-w64-mingw32-clang -shared -D_JNI_IMPLEMENTATION_ -Wl,--kill-at -DZSTD_DLL_EXPORT=1 -O3 -DZSTD_MULTITHREAD=1 -I./src/windows/include -I./jni -I./src/main/native -I./src/main/native/common -std=c99 -o libzstd-jni-$(cat version).dll ./src/main/native/*.c ./src/main/native/common/*.c ./src/main/native/compress/*.c ./src/main/native/decompress/*.[cS] ./src/main/native/dictBuilder/*.c
 
         - name: Deploy
           if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master'}}

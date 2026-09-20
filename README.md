@@ -57,6 +57,27 @@ The Java classes cannot be renamed/minimized/relocated. JVM linking the native
 library depends on the class name that is trying to link the native part, so
 changing the class names will lead to failed linking at runtime.
 
+Foreign Function & Memory API
+-----------------------------
+
+Some classes are being ported from JNI to the Foreign Function & Memory API
+([JEP 454](https://openjdk.org/jeps/454)). The ported versions are compiled
+for JDK 22 and shipped inside the same Jar under `META-INF/versions/22`,
+which makes it a Multi-Release Jar: a JDK 22+ runtime loads them, anything
+older keeps loading the JNI implementation from the Jar root. The public API
+and the behaviour are identical either way, so there is nothing to configure
+and nothing to change in your code.
+
+If you need to force the JNI implementation on a JDK 22+ runtime, start the
+JVM with:
+
+    -Djdk.util.jar.enableMultiRelease=false
+
+Note that this disables Multi-Release dispatch for *every* Jar on the
+classpath, not just this one, so it is an escape hatch rather than a supported
+configuration. Repackaging into a fat Jar has the same effect whenever the
+`Multi-Release: true` manifest attribute is not carried over.
+
 Building and dependencies
 -------------------------
 
@@ -75,6 +96,13 @@ $ cd sbt-java-module-info && ./sbt publishLocal && cd -
 Compile and test:
 ```
  $ ./sbt compile test package
+```
+
+*Note*: `./sbt test` covers the JNI implementation only. The JDK 22+ one built on the Foreign Function
+& Memory API ships in `META-INF/versions/22`, and Multi-Release dispatch only happens from a jar, so
+testing it means packaging first and then choosing the runtime:
+```
+ $ ./sbt testFromJarSetup testFromJar
 ```
 
 If you want to publish it to you local ivy2 repository:
@@ -135,7 +163,12 @@ Android support
 ---------------
 
 Zstd-jni is usable in Android applications by importing the sources in Android
-Studio. I guess using git submodules will also work.
+Studio. I guess using git submodules will also work. Import *src/main/java*
+rather than *src/main* as a whole: *src/main/java22* holds an alternative
+implementation of a few classes built on the Java 22 `java.lang.foreign` API,
+which the published jar ships under `META-INF/versions/22` for JDK 22+ runtimes
+only. It duplicates class names from *src/main/java* and does not compile on
+Android.
 
 Android archive (*zstd-jni.aar*) is also published on maven central that
 support Android 5.0 and above. You will need to add the repository in your

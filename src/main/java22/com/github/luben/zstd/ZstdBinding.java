@@ -4,10 +4,12 @@ import com.github.luben.zstd.util.Native;
 
 import org.jetbrains.annotations.NotNull;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.SegmentAllocator;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
@@ -43,6 +45,13 @@ final class ZstdBinding {
     private static final ValueLayout C_SIZE_T = cSizeT();
 
     private static final boolean SIZE_T_IS_64_BIT = C_SIZE_T.byteSize() == 8;
+
+    /* `unsigned long long` is 8 bytes everywhere, but its ABI alignment is not: the
+     * System V i386 ABI aligns it to 4. Taken from the linker rather than written as
+     * ValueLayout.JAVA_LONG so the struct below and the pledged-size argument carry
+     * the platform's alignment. */
+    private static final ValueLayout.OfLong C_LONG_LONG =
+            (ValueLayout.OfLong) LINKER.canonicalLayouts().get("long long");
 
     /* Declared ahead of every downcall handle below: `adapt` reads it while they
      * initialize, and static initializers run in source order. */
@@ -115,7 +124,19 @@ final class ZstdBinding {
     static final int ZSTD_E_END      = 2;
 
     /* ZSTD_ResetDirective */
-    static final int ZSTD_RESET_SESSION_ONLY = 1;
+    static final int ZSTD_RESET_SESSION_ONLY           = 1;
+    static final int ZSTD_RESET_SESSION_AND_PARAMETERS = 3;
+
+    /* ZSTD_cParameter */
+    static final int ZSTD_C_COMPRESSION_LEVEL = 100;
+    static final int ZSTD_C_CONTENT_SIZE_FLAG = 200;
+    static final int ZSTD_C_CHECKSUM_FLAG     = 201;
+    static final int ZSTD_C_DICT_ID_FLAG      = 202;
+
+    /* ZSTD_ErrorCode */
+    static final int ZSTD_ERROR_DICTIONARY_WRONG   = 32;
+    static final int ZSTD_ERROR_DST_SIZE_TOO_SMALL = 70;
+    static final int ZSTD_ERROR_SRC_SIZE_WRONG     = 72;
 
     private static final MethodHandle ZSTD_CStreamOutSize =
             downcall(
@@ -137,6 +158,101 @@ final class ZstdBinding {
                     "ZSTD_CCtx_reset",
                     FunctionDescriptor.of(C_SIZE_T, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
                     MethodType.methodType(long.class, MemorySegment.class, int.class));
+    private static final MethodHandle ZSTD_initCStream =
+            downcall(
+                    "ZSTD_initCStream",
+                    FunctionDescriptor.of(C_SIZE_T, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+                    MethodType.methodType(long.class, MemorySegment.class, int.class));
+    private static final MethodHandle ZSTD_CCtx_setParameter =
+            downcall(
+                    "ZSTD_CCtx_setParameter",
+                    FunctionDescriptor.of(
+                            C_SIZE_T,
+                            ValueLayout.ADDRESS,                                       // ZSTD_CCtx* cctx
+                            ValueLayout.JAVA_INT,                                      // ZSTD_cParameter param
+                            ValueLayout.JAVA_INT),                                     // int value
+                    MethodType.methodType(long.class, MemorySegment.class, int.class, int.class));
+    /* critical: the dictionary is a caller-supplied heap byte[]. libzstd copies it
+     * (ZSTD_dlm_byCopy is the default), so nothing retains the pointer past the call. */
+    private static final MethodHandle ZSTD_CCtx_loadDictionary =
+            downcallCritical(
+                    "ZSTD_CCtx_loadDictionary",
+                    FunctionDescriptor.of(C_SIZE_T, ValueLayout.ADDRESS, ValueLayout.ADDRESS, C_SIZE_T),
+                    MethodType.methodType(long.class, MemorySegment.class, MemorySegment.class, long.class));
+    private static final MethodHandle ZSTD_CCtx_refCDict =
+            downcall(
+                    "ZSTD_CCtx_refCDict",
+                    FunctionDescriptor.of(C_SIZE_T, ValueLayout.ADDRESS, ValueLayout.ADDRESS),
+                    MethodType.methodType(long.class, MemorySegment.class, MemorySegment.class));
+    private static final MethodHandle ZSTD_createCCtx =
+            downcall(
+                    "ZSTD_createCCtx",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS),
+                    MethodType.methodType(MemorySegment.class));
+    private static final MethodHandle ZSTD_freeCCtx =
+            downcall(
+                    "ZSTD_freeCCtx",
+                    FunctionDescriptor.of(C_SIZE_T, ValueLayout.ADDRESS),
+                    MethodType.methodType(long.class, MemorySegment.class));
+    private static final MethodHandle ZSTD_CCtx_setPledgedSrcSize =
+            downcall(
+                    "ZSTD_CCtx_setPledgedSrcSize",
+                    FunctionDescriptor.of(C_SIZE_T, ValueLayout.ADDRESS, C_LONG_LONG),
+                    MethodType.methodType(long.class, MemorySegment.class, long.class));
+    /* critical: dst and src may both be heap byte[]s, and the one-shot entry point
+     * takes them as plain pointer arguments, so neither needs staging. The JNI
+     * implementation pins them the same way (GetPrimitiveArrayCritical). */
+    private static final MethodHandle ZSTD_compress2 =
+            downcallCritical(
+                    "ZSTD_compress2",
+                    FunctionDescriptor.of(
+                            C_SIZE_T,
+                            ValueLayout.ADDRESS,                                       // ZSTD_CCtx* cctx
+                            ValueLayout.ADDRESS, C_SIZE_T,                             // dst, dstCapacity
+                            ValueLayout.ADDRESS, C_SIZE_T),                            // src, srcSize
+                    MethodType.methodType(long.class,
+                            MemorySegment.class,
+                            MemorySegment.class, long.class,
+                            MemorySegment.class, long.class));
+
+    /* ZSTD_frameProgression, returned by value. C_LONG_LONG rather than
+     * ValueLayout.JAVA_LONG for the reason C_SIZE_T exists: a descriptor has to describe
+     * the platform's C type, and while `long long` is 8 bytes everywhere, the i386 ABI
+     * aligns it to 4 where JAVA_LONG would claim 8. JAVA_INT needs no such care - `int`
+     * is 4 bytes, 4-aligned, everywhere. Offsets come out 0/8/16/24/32/36 and the size
+     * 40 either way. */
+    private static final MemoryLayout ZSTD_frameProgression = MemoryLayout.structLayout(
+            C_LONG_LONG.withName("ingested"),
+            C_LONG_LONG.withName("consumed"),
+            C_LONG_LONG.withName("produced"),
+            C_LONG_LONG.withName("flushed"),
+            ValueLayout.JAVA_INT.withName("currentJobID"),
+            ValueLayout.JAVA_INT.withName("nbActiveWorkers"));
+
+    private static long offsetIn(@NotNull MemoryLayout layout, @NotNull String field) {
+        return layout.byteOffset(MemoryLayout.PathElement.groupElement(field));
+    }
+
+    private static final long FP_INGESTED          = offsetIn(ZSTD_frameProgression, "ingested");
+    private static final long FP_CONSUMED          = offsetIn(ZSTD_frameProgression, "consumed");
+    private static final long FP_PRODUCED          = offsetIn(ZSTD_frameProgression, "produced");
+    private static final long FP_FLUSHED           = offsetIn(ZSTD_frameProgression, "flushed");
+    private static final long FP_CURRENT_JOB_ID    = offsetIn(ZSTD_frameProgression, "currentJobID");
+    private static final long FP_NB_ACTIVE_WORKERS = offsetIn(ZSTD_frameProgression, "nbActiveWorkers");
+
+    /* Deliberately not critical(true), which would let the result buffer below be a heap
+     * array: Linker.Option.critical only promises that heap segments may be passed "as
+     * addresses", i.e. as pointer arguments. A struct returned by value goes to a buffer
+     * the linker takes from a SegmentAllocator, and nothing says that may be on the heap.
+     * It happens to work on linux/x86-64 and does not elsewhere - macos/aarch64 throws,
+     * and the i386 FallbackLinker silently writes the struct somewhere else and leaves
+     * the array zeroed.
+     */
+    private static final MethodHandle ZSTD_getFrameProgression =
+            downcall(
+                    "ZSTD_getFrameProgression",
+                    FunctionDescriptor.of(ZSTD_frameProgression, ValueLayout.ADDRESS),
+                    MethodType.methodType(MemorySegment.class, SegmentAllocator.class, MemorySegment.class));
 
     /* Not plain ZSTD_compressStream2, which takes ZSTD_inBuffer / ZSTD_outBuffer:
      * under Linker.Option.critical - the FFM analogue of the JNI implementation's
@@ -176,6 +292,11 @@ final class ZstdBinding {
                     "ZSTD_createDStream",
                     FunctionDescriptor.of(ValueLayout.ADDRESS),
                     MethodType.methodType(MemorySegment.class));
+    private static final MethodHandle ZSTD_initDStream =
+            downcall(
+                    "ZSTD_initDStream",
+                    FunctionDescriptor.of(C_SIZE_T, ValueLayout.ADDRESS),
+                    MethodType.methodType(long.class, MemorySegment.class));
     /* ZSTD_freeDStream's counterpart, and the one the JNI implementation calls:
      * a ZSTD_DStream is a ZSTD_DCtx, and both functions free it the same way. */
     private static final MethodHandle ZSTD_freeDCtx =
@@ -272,6 +393,22 @@ final class ZstdBinding {
         }
     }
 
+    /**
+     * Checks native results in Java, avoiding an extra JNI call to {@link Zstd#isError}.
+     * These checks replace error checks previously performed inside the JNI C code.
+     * <p>
+     * Tests the sign bit of the native {@code size_t}: zstd errors set it, while the
+     * successful results handled here do not. This is broader than {@code ZSTD_isError},
+     * but avoids hard-coding its version-dependent error-code limit.
+     * <p>
+     * On 32-bit platforms, cast back to {@code int} because {@code adapt} zero-extends
+     * native results to {@code long}. Use only for checks introduced by the FFM port;
+     * existing calls to {@link Zstd#isError} stay unchanged.
+     */
+    static boolean isError(long result) {
+        return SIZE_T_IS_64_BIT ? result < 0 : (int) result < 0;
+    }
+
     static @NotNull SizeTRef newSizeTRef() {
         return SIZE_T_IS_64_BIT
                 ? new SizeTRef.Wide(new long[1])
@@ -311,10 +448,137 @@ final class ZstdBinding {
         }
     }
 
+    static long initCStream(@NotNull MemorySegment cctx, int level) {
+        try {
+            return (long) ZSTD_initCStream.invokeExact(cctx, level);
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_initCStream failed", t);
+        }
+    }
+
+    /** @param param one of the ZSTD_C_* values */
+    static long setCCtxParameter(@NotNull MemorySegment cctx, int param, int value) {
+        try {
+            return (long) ZSTD_CCtx_setParameter.invokeExact(cctx, param, value);
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_CCtx_setParameter failed", t);
+        }
+    }
+
+    /** `dictSize` is a plain length: the dictionary always starts at the segment's base. */
+    static long loadDictionary(@NotNull MemorySegment cctx, @NotNull MemorySegment dict, long dictSize) {
+        try {
+            return (long) ZSTD_CCtx_loadDictionary.invokeExact(cctx, dict, dictSize);
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_CCtx_loadDictionary failed", t);
+        }
+    }
+
+    static long refCDict(@NotNull MemorySegment cctx, @NotNull MemorySegment cdict) {
+        try {
+            return (long) ZSTD_CCtx_refCDict.invokeExact(cctx, cdict);
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_CCtx_refCDict failed", t);
+        }
+    }
+
+    static @NotNull MemorySegment createCCtx() {
+        try {
+            return (MemorySegment) ZSTD_createCCtx.invokeExact();
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_createCCtx failed", t);
+        }
+    }
+
+    static long freeCCtx(@NotNull MemorySegment cctx) {
+        try {
+            return (long) ZSTD_freeCCtx.invokeExact(cctx);
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_freeCCtx failed", t);
+        }
+    }
+
+    static long setPledgedSrcSize(@NotNull MemorySegment cctx, long pledgedSrcSize) {
+        try {
+            return (long) ZSTD_CCtx_setPledgedSrcSize.invokeExact(cctx, pledgedSrcSize);
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_CCtx_setPledgedSrcSize failed", t);
+        }
+    }
+
     /**
-     * `srcSize` is an absolute end offset rather than a length, matching the way
-     * the JNI implementation calls this: libzstd is handed the whole array and
-     * reads from `srcPos` up to `srcSize`. Both position segments are in/out.
+     * The one-shot counterpart of {@link #compressStream2}: no position slots, so
+     * `dstCapacity` and `srcSize` are plain lengths and each segment starts where
+     * libzstd does.
+     */
+    static long compress2(@NotNull MemorySegment cctx,
+                          @NotNull MemorySegment dst, long dstCapacity,
+                          @NotNull MemorySegment src, long srcSize) {
+        try {
+            return (long) ZSTD_compress2.invokeExact(cctx, dst, dstCapacity, src, srcSize);
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_compress2 failed", t);
+        }
+    }
+
+    /**
+     * The buffer {@code ZSTD_getFrameProgression} writes its result into.
+     * <p>
+     * A struct returned by value goes through a hidden pointer to memory the caller owns,
+     * which FFM asks for as a {@link SegmentAllocator} first parameter on the handle: the
+     * linker calls it once per downcall, for one buffer of the struct's size. Nothing else
+     * calls it and the buffer is dead once the fields are copied out, so both arguments
+     * are ignored and the same cell is returned every time.
+     * <p>
+     * The cell has to be off-heap - see the comment on the handle - but it does not have
+     * to be new each time, which is the whole cost an {@code Arena} carries here: a
+     * {@code malloc}/{@code free} pair per call. One automatic arena per buffer instead,
+     * so there is nothing to close, no shared-arena thread handshake, and no confinement
+     * to the thread that happened to ask first; the memory goes when this object does.
+     */
+    static final class FrameProgressionBuffer implements SegmentAllocator {
+        private final @NotNull MemorySegment cell = Arena.ofAuto().allocate(ZSTD_frameProgression);
+
+        @Override
+        public @NotNull MemorySegment allocate(long byteSize, long byteAlignment) {
+            // Always the layout's own size and alignment, and asked for once per call.
+            return cell;
+        }
+    }
+
+    /**
+     * Builds the {@link ZstdFrameProgression} here rather than returning the struct,
+     * which is what the JNI implementation's {@code NewObject} does at the same point -
+     * minus its {@code FindClass} and {@code GetMethodID}, which the C repeats on every
+     * call. The fields are read through the layout, which carries the platform's byte
+     * order: the two {@code unsigned} members share one slot, so separating them by hand
+     * would be right only on a little-endian machine.
+     *
+     * @param into the caller's reusable cell, so that nothing is allocated per call
+     */
+    static @NotNull ZstdFrameProgression frameProgression(@NotNull MemorySegment cctx,
+                                                          @NotNull FrameProgressionBuffer into) {
+        MemorySegment progression;
+        try {
+            progression = (MemorySegment) ZSTD_getFrameProgression.invokeExact((SegmentAllocator) into, cctx);
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_getFrameProgression failed", t);
+        }
+        return new ZstdFrameProgression(
+                progression.get(C_LONG_LONG, FP_INGESTED),
+                progression.get(C_LONG_LONG, FP_CONSUMED),
+                progression.get(C_LONG_LONG, FP_PRODUCED),
+                progression.get(C_LONG_LONG, FP_FLUSHED),
+                progression.get(ValueLayout.JAVA_INT, FP_CURRENT_JOB_ID),
+                progression.get(ValueLayout.JAVA_INT, FP_NB_ACTIVE_WORKERS));
+    }
+
+    /**
+     * `dstCapacity` and `srcSize` are measured from the start of the segments handed
+     * over, not from where libzstd begins at `dstPos` / `srcPos` - so a caller that
+     * passes a whole array with a non-zero start position passes an absolute end
+     * offset rather than a length, as the JNI implementation does. Both position
+     * segments are in/out.
      *
      * @param endOp one of the ZSTD_E_* values
      */
@@ -357,6 +621,14 @@ final class ZstdBinding {
         }
     }
 
+    static long initDStream(@NotNull MemorySegment dctx) {
+        try {
+            return (long) ZSTD_initDStream.invokeExact(dctx);
+        } catch (Throwable t) {
+            throw new AssertionError("Call to ZSTD_initDStream failed", t);
+        }
+    }
+
     static long freeDCtx(@NotNull MemorySegment dctx) {
         try {
             return (long) ZSTD_freeDCtx.invokeExact(dctx);
@@ -366,12 +638,14 @@ final class ZstdBinding {
     }
 
     /**
-     * Like {@link #compressStream2}, `dstCapacity` is an absolute end offset
-     * rather than a length - libzstd gets the whole destination array and writes
-     * from `dstPos` up to `dstCapacity`, as it does in the JNI implementation.
-     * `srcSize` really is a length there: it is how many bytes the last upstream
-     * read put at the front of the source buffer. Both position segments are
-     * in/out.
+     * `dstCapacity` and `srcSize` bound the segment from its start, not from where
+     * libzstd begins at `dstPos`/`srcPos`, so every caller hands over a whole array or
+     * buffer and an absolute end offset - a length only when the position starts at 0.
+     * Both position segments are in/out. The names are libzstd's (zstd.h:2614-2615).
+     *
+     * <p>The convention is ZstdInputStreamNoFinalizer's C (jni_inputstream_zstd.c:83-84).
+     * The two buffer-decompressing streams' C instead shifts the pointer and passes a
+     * length with `pos = 0`, reaching the same span the other way round.
      */
     static long decompressStream(@NotNull MemorySegment dctx,
                                  @NotNull MemorySegment dst, long dstCapacity, @NotNull MemorySegment dstPos,

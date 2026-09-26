@@ -36,7 +36,7 @@ jobs:
 
         # Coverage has to come off target/classes: sbt-jacoco instruments that
         # directory offline, so it cannot be collected from a jar run - hence
-        # JNI-only, and on this platform alone.
+        # JNI-only, and on this platform alone. It also compiles the JNI libs
         - name: Test and collect coverage (JNI)
           run: ./sbt jacoco
 
@@ -105,8 +105,9 @@ jobs:
         - name: Install sbt-java-module-info
           run: pushd ./sbt-java-module-info; ./sbt publishLocal; popd
 
+        # Explicit compile to create the JNI native objects
         - name: Package
-          run: ./sbt testFromJarSetup
+          run: ./sbt compile testFromJarSetup
 
         # After packaging, not before - see the linux job for why.
         - name: Env
@@ -167,8 +168,9 @@ jobs:
         - name: Install sbt-java-module-info
           run: cd ./sbt-java-module-info; ./sbt publishLocal
 
+        # Explicit compile to create the JNI native objects
         - name: Package
-          run: ./sbt testFromJarSetup
+          run: ./sbt compile testFromJarSetup
 
         - name: Test from jar (JDK 25, FFM)
           run: ./sbt "testFromJar ${{ steps.jdk25.outputs.path }}"
@@ -216,9 +218,6 @@ jobs:
 
         - name: Install sbt-java-module-info
           run: cd ./sbt-java-module-info; ./sbt publishLocal
-
-        - name: Compile
-          run: ./sbt compile
 
         - name: Test (JNI)
           run: ./sbt test

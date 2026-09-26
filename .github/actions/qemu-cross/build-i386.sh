@@ -19,5 +19,5 @@ popd
 
 # The 32-bit job exists to exercise FFM's FallbackLinker and 4-byte size_t.
 # JNI coverage is provided by the other jobs.
-./sbt -v testFromJarSetup \
+./sbt -v compile testFromJarSetup \
          "testFromJar $JAVA_HOME"

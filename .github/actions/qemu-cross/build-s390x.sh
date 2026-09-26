@@ -13,6 +13,6 @@ pushd sbt-java-module-info
 popd
 
 # Exercise both implementations from the same packaged jar.
-./sbt -v testFromJarSetup \
+./sbt -v compile testFromJarSetup \
          "testFromJar $JAVA_HOME" \
          "testFromJar $JAVA_HOME -Djdk.util.jar.enableMultiRelease=false"

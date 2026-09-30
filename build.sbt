@@ -79,13 +79,19 @@ jniGccFlags ++= Seq(
 // to produce correct DLLs, also it alway produces position independent
 // code so let's remove the flag and silence a warning
 jniGccFlags := (
-  if (System.getProperty("os.name").toLowerCase startsWith "win")
+  if (System.getProperty("os.name").toLowerCase startsWith "win") {
+    // clang on ARM64, where MSYS2 only has the CLANGARM64 environment uses the
+    // libzstd-jni.so.exported, on x86 we still use libzstd-jni.so.map
+    val versionScript =
+      if (jniNativeCompiler.value.contains("clang")) Seq("-exported_symbols_list", PWD + "/libzstd-jni.so.exported")
+      else Seq("-Wl,--version-script=" + PWD + "/libzstd-jni.so.map")
     jniGccFlags.value.filterNot(_ == "-fPIC") ++
       Seq("-D_JNI_IMPLEMENTATION_", "-Wl,--kill-at",
         // Exports ZSTD_* for FFM's symbol lookups. jni_md.h's JNIEXPORT dllexport turns
         // ld's auto-export off, and on PE the version script can only filter, not add.
         "-DZSTD_DLL_EXPORT=1",
-        "-static-libgcc", "-Wl,--version-script=" + PWD + "/libzstd-jni.so.map")
+        "-static-libgcc") ++ versionScript
+  }
   else if (System.getProperty("os.name").toLowerCase startsWith "mac") {
    // For intel, target the latest version that supported 32bit binaries
     val target = if (System.getProperty("os.arch") == "x86_64") {

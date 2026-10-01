@@ -1,4 +1,4 @@
-name: Build for Android
+name: Build AAR
 
 on:
   pull_request:
@@ -6,19 +6,37 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  android:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
         with:
-          fetch-depth: 0
-          submodules: recursive
-      - name: Build
+          java-version: 17
+          distribution: zulu
+
+      - uses: android-actions/setup-android@v4
+      - name: Install Android SDK components
+        run: sdkmanager --install "platforms;android-36" "ndk;28.2.13676358" "cmake;3.22.1"
+
+      - name: Install Python
         run: |
-          bash ./build.sh
-      - name: Upload
-        uses: actions/upload-artifact@v4
+          sudo apt update
+          sudo apt install python3 -y
+
+      - name: Distant horizons
+        run: |
+          python3 ./replace.py
+
+      - name: Install sbt-java-module-info
+        run: pushd ./sbt-java-module-info; ./sbt publishLocal; popd
+
+      - name: Build AAR
+        run: ./sbt aarTask
+
+      - name: Upload AAR
+        uses: actions/upload-artifact@v7
         with:
           name: zstd-jni
-          path: ./build/*.so
+          path: "target/*.aar"
